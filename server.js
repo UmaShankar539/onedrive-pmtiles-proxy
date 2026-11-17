@@ -1,11 +1,10 @@
+
 const http = require("http");
 const { Readable } = require("stream");
 
 const PORT = process.env.PORT || 3000;
 const FILE_URL = process.env.ONEDRIVE_FILE_URL;
-
-const ALLOWED_ORIGIN =
-  "https://umashankar539.github.io";
+const ALLOWED_ORIGIN = "https://umashankar539.github.io";
 
 const server = http.createServer(async (req, res) => {
   const origin = req.headers.origin;
@@ -22,7 +21,6 @@ const server = http.createServer(async (req, res) => {
     "Access-Control-Expose-Headers",
     "Accept-Ranges, Content-Range, Content-Length, Content-Type"
   );
-  res.setHeader("Vary", "Origin");
 
   if (req.method === "OPTIONS") {
     res.writeHead(204);
@@ -36,7 +34,7 @@ const server = http.createServer(async (req, res) => {
 
   if (!FILE_URL) {
     res.writeHead(500);
-    return res.end("Missing ONEDRIVE_FILE_URL setting");
+    return res.end("Missing ONEDRIVE_FILE_URL");
   }
 
   if (req.url === "/test") {
@@ -46,21 +44,37 @@ const server = http.createServer(async (req, res) => {
         redirect: "follow"
       });
 
-      const bytes = await upstream.arrayBuffer();
+      if (upstream.status !== 206 || !upstream.body) {
+        await upstream.body?.cancel();
+        res.writeHead(502);
+        return res.end("RANGE TEST FAILED: OneDrive did not return HTTP 206");
+      }
 
-      res.writeHead(200, {
-        "Content-Type": "text/plain"
-      });
+      const contentRange = upstream.headers.get("content-range") || "";
 
+      if (!contentRange.startsWith("bytes 0-126/")) {
+        await upstream.body.cancel();
+        res.writeHead(502);
+        return res.end("RANGE TEST FAILED: Unexpected Content-Range");
+      }
+
+      const reader = upstream.body.getReader();
+      let total = 0;
+
+      while (total < 127) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.length;
+      }
+
+      await reader.cancel();
+
+      res.writeHead(200, { "Content-Type": "text/plain" });
       return res.end(
-        "Upstream status: " + upstream.status +
-        "\nDownloaded bytes: " + bytes.byteLength +
-        "\nContent-Range: " +
-        (upstream.headers.get("content-range") || "Not available") +
-        "\n\n" +
-        (upstream.status === 206 && bytes.byteLength === 127
-          ? "RANGE TEST SUCCESS"
-          : "RANGE TEST FAILED")
+        "Upstream status: 206" +
+        "\nDownloaded bytes: " + total +
+        "\nContent-Range: " + contentRange +
+        "\n\n" + (total === 127 ? "RANGE TEST SUCCESS" : "RANGE TEST FAILED")
       );
     } catch (error) {
       res.writeHead(502);
@@ -75,9 +89,9 @@ const server = http.createServer(async (req, res) => {
 
   const range = req.headers.range;
 
-  if (!range) {
+  if (!range || !/^bytes=\d+-\d*$/.test(range)) {
     res.writeHead(400);
-    return res.end("A Range header is required");
+    return res.end("A single byte Range header is required");
   }
 
   try {
@@ -88,20 +102,22 @@ const server = http.createServer(async (req, res) => {
 
     if (upstream.status !== 206 || !upstream.body) {
       await upstream.body?.cancel();
-
       res.writeHead(502);
-      return res.end(
-        "OneDrive did not return HTTP 206 Partial Content"
-      );
+      return res.end("OneDrive did not return HTTP 206 Partial Content");
+    }
+
+    const contentRange = upstream.headers.get("content-range");
+
+    if (!contentRange || !contentRange.startsWith("bytes ")) {
+      await upstream.body.cancel();
+      res.writeHead(502);
+      return res.end("OneDrive returned an invalid Content-Range");
     }
 
     const headers = {
-      "Content-Type":
-        upstream.headers.get("content-type") ||
-        "application/octet-stream",
+      "Content-Type": "application/octet-stream",
       "Accept-Ranges": "bytes",
-      "Content-Range":
-        upstream.headers.get("content-range"),
+      "Content-Range": contentRange,
       "Cache-Control": "public, max-age=3600"
     };
 
@@ -124,4 +140,3 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, () => {
   console.log("PMTiles proxy running on port " + PORT);
 });
-
