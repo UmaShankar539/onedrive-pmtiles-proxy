@@ -37,6 +37,7 @@ const server = http.createServer(async (req, res) => {
     return res.end("Missing ONEDRIVE_FILE_URL");
   }
 
+  // DIAGNOSTIC TEST
   if (req.url === "/test") {
     try {
       const upstream = await fetch(FILE_URL, {
@@ -44,44 +45,44 @@ const server = http.createServer(async (req, res) => {
         redirect: "follow"
       });
 
-      if (upstream.status !== 206 || !upstream.body) {
-        await upstream.body?.cancel();
-        res.writeHead(502);
-        return res.end("RANGE TEST FAILED: OneDrive did not return HTTP 206");
+      let preview = "";
+
+      if (upstream.body) {
+        const reader = upstream.body.getReader();
+        const { value } = await reader.read();
+
+        if (value) {
+          preview = new TextDecoder().decode(
+            value.slice(0, 500)
+          );
+        }
+
+        await reader.cancel();
       }
 
-      const contentRange = upstream.headers.get("content-range") || "";
+      res.writeHead(200, {
+        "Content-Type": "text/plain; charset=utf-8"
+      });
 
-      if (!contentRange.startsWith("bytes 0-126/")) {
-        await upstream.body.cancel();
-        res.writeHead(502);
-        return res.end("RANGE TEST FAILED: Unexpected Content-Range");
-      }
-
-      const reader = upstream.body.getReader();
-      let total = 0;
-
-      while (total < 127) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        total += value.length;
-      }
-
-      await reader.cancel();
-
-      res.writeHead(200, { "Content-Type": "text/plain" });
       return res.end(
-        "Upstream status: 206" +
-        "\nDownloaded bytes: " + total +
-        "\nContent-Range: " + contentRange +
-        "\n\n" + (total === 127 ? "RANGE TEST SUCCESS" : "RANGE TEST FAILED")
+        "HTTP STATUS: " + upstream.status +
+        "\nFINAL URL: " + upstream.url +
+        "\nCONTENT TYPE: " +
+        upstream.headers.get("content-type") +
+        "\nCONTENT RANGE: " +
+        upstream.headers.get("content-range") +
+        "\nCONTENT LENGTH: " +
+        upstream.headers.get("content-length") +
+        "\n\nBODY PREVIEW:\n" + preview
       );
+
     } catch (error) {
       res.writeHead(502);
-      return res.end("Test failed: " + error.message);
+      return res.end("Diagnostic error: " + error.message);
     }
   }
 
+  // PMTILES RANGE REQUEST
   if (req.url !== "/file" || req.method !== "GET") {
     res.writeHead(404);
     return res.end("Not found");
@@ -102,16 +103,21 @@ const server = http.createServer(async (req, res) => {
 
     if (upstream.status !== 206 || !upstream.body) {
       await upstream.body?.cancel();
+
       res.writeHead(502);
-      return res.end("OneDrive did not return HTTP 206 Partial Content");
+      return res.end(
+        "OneDrive did not return HTTP 206 Partial Content"
+      );
     }
 
-    const contentRange = upstream.headers.get("content-range");
+    const contentRange =
+      upstream.headers.get("content-range");
 
     if (!contentRange || !contentRange.startsWith("bytes ")) {
       await upstream.body.cancel();
+
       res.writeHead(502);
-      return res.end("OneDrive returned an invalid Content-Range");
+      return res.end("Invalid Content-Range from OneDrive");
     }
 
     const headers = {
@@ -122,9 +128,13 @@ const server = http.createServer(async (req, res) => {
     };
 
     const length = upstream.headers.get("content-length");
-    if (length) headers["Content-Length"] = length;
+
+    if (length) {
+      headers["Content-Length"] = length;
+    }
 
     res.writeHead(206, headers);
+
     Readable.fromWeb(upstream.body).pipe(res);
 
   } catch (error) {
